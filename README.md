@@ -1,2 +1,2 @@
 # go-go-go
-Project
+This project will be a project about a Snake game
