@@ -1,0 +1,1235 @@
+# Snake — Google-Snake-Style Customizable Edition (with Spiral fix + Coins/PowerUps/Shop + Tutorial)
+# Python 3.7+, pygame 2.x
+
+import sys, random, math
+from collections import deque
+import pygame as pg
+
+# ==================== Config & Defaults ====================
+CELL_SIZE = 32
+GRID_W, GRID_H = 24, 18
+W, H = GRID_W * CELL_SIZE, GRID_H * CELL_SIZE
+FPS = 60
+
+MOVE_SLOW, MOVE_NORM, MOVE_FAST = 200, 140, 90
+BG_TOP, BG_BOTTOM = (18, 24, 38), (10, 12, 20)
+GRID_COLOR = (36, 44, 64)
+TEXT_COLOR = (230, 235, 245)
+
+# Google-Snake-ish palette + shiny
+COLOR_OPTIONS = [
+    ("Blue",   (80,160,255)),
+    ("Cyan",   (100,220,220)),
+    ("Purple", (170,120,255)),
+    ("Pink",   (255,120,200)),
+    ("Red",    (235,85,95)),
+    ("Orange", (255,170,92)),
+    ("Yellow", (255,222,89)),
+    ("Green",  (56,214,169)),
+    ("White",  (240,240,245)),
+    ("Black",  (30,30,30)),
+    ("Neon",   (120,255,160)),
+    ("Rainbow",(255,255,255)),  # special animated
+]
+HEAD_COLOR = (255, 240, 128)
+
+# UI FX
+SHAKE_MS = 260
+SHAKE_MAG = 12
+FLASH_MS = 140
+
+# Instructions (Mode Menu only)
+INSTR_TEXT = "←/A • →/D cycle • Enter/Space select • Esc quit • C Customize • H Shop  • Tip: Press T to Teleport"
+INSTR_SHOW_MS = 4500
+INSTR_FADE_MS = 800
+
+# Customizable defaults
+DEFAULT_PROJECTILE_SPEED = 1
+DEFAULT_FIREBALL_MULT    = 8.0
+DEFAULT_DRONE_DELAY      = 6
+DEFAULT_APPLES_AT_ONCE   = 1
+
+# Maps
+MAP_OPTIONS = ["Classic", "Box", "Spiral", "RandomWalls"]
+
+GRID_ON = True
+
+# ======== NEW: Coins + PowerUps config ========
+COIN_COUNT_BASE = 2
+POWERUP_SPAWN_CHANCE_PER_MOVE = 0.07
+POWERUP_MAX_ON_FIELD = 3
+MAGNET_DURATION_SEC = 12
+PRICE_SHIELD = 6
+PRICE_MAGNET = 7
+PRICE_TELE   = 5
+
+# ==================== Helpers ====================
+def lerp(a,b,t): return a + (b-a)*t
+def cell_to_px(c): return (c[0]*CELL_SIZE, c[1]*CELL_SIZE)
+
+def draw_gradient(surf, top=BG_TOP, bottom=BG_BOTTOM):
+    for y in range(H):
+        u = y/max(1,H-1)
+        r = int(lerp(top[0], bottom[0], u))
+        g = int(lerp(top[1], bottom[1], u))
+        b = int(lerp(top[2], bottom[2], u))
+        pg.draw.line(surf, (r,g,b), (0,y), (W,y))
+
+def draw_grid(surf):
+    if not GRID_ON: return
+    for x in range(0, W, CELL_SIZE): pg.draw.line(surf, GRID_COLOR, (x,0),(x,H),1)
+    for y in range(0, H, CELL_SIZE): pg.draw.line(surf, GRID_COLOR, (0,y),(W,y),1)
+
+def rounded_rect(surf, color, rect, radius=10, width=0):
+    pg.draw.rect(surf, color, rect, width=width, border_radius=radius)
+
+def glow_circle(surf, center, base_radius, color_rgba, rings=3):
+    r,g,b,a = color_rgba
+    for i in range(rings,0,-1):
+        t = i/rings
+        alpha = int(a*t*t)
+        rad = int(base_radius*(1+0.6*(1-t)))
+        layer = pg.Surface((rad*2, rad*2), pg.SRCALPHA)
+        pg.draw.circle(layer, (r,g,b,alpha), (rad,rad), rad)
+        surf.blit(layer, (center[0]-rad, center[1]-rad), special_flags=pg.BLEND_PREMULTIPLIED)
+
+def hsv_to_rgb(h, s, v):
+    i = int(h*6); f = h*6 - i
+    p = v*(1-s); q = v*(1-f*s); t = v*(1-(1-f)*s)
+    i%=6
+    r,g,b=[(v,t,p),(q,v,p),(p,v,t),(p,q,v),(t,p,v),(v,p,q)][i]
+    return int(r*255),int(g*255),int(b*255)
+
+# ==================== UI Controls ====================
+class Button:
+    def __init__(self, rect, text, font, on_click, fill=(30,40,60), fg=(240,245,255)):
+        self.rect = pg.Rect(rect)
+        self.text = text
+        self.font = font
+        self.on_click = on_click
+        self.fill = fill
+        self.fg = fg
+    def draw(self, surf):
+        rounded_rect(surf, self.fill, self.rect, radius=8)
+        lbl = self.font.render(self.text, True, self.fg)
+        surf.blit(lbl, lbl.get_rect(center=self.rect.center))
+    def handle(self, e):
+        if e.type == pg.MOUSEBUTTONDOWN and e.button==1 and self.rect.collidepoint(e.pos):
+            self.on_click()
+
+class Toggle:
+    def __init__(self, label, x, y, font, init=False):
+        self.label = label
+        self.font = font
+        self.value = init
+        self.box = pg.Rect(x, y, 24, 24)
+    def draw(self, surf):
+        rounded_rect(surf, (30,40,60), self.box, radius=6)
+        if self.value:
+            pg.draw.line(surf, (170,240,180), (self.box.x+6,self.box.y+12),(self.box.x+11,self.box.y+18),3)
+            pg.draw.line(surf, (170,240,180), (self.box.x+11,self.box.y+18),(self.box.x+18,self.box.y+6),3)
+        txt = self.font.render(self.label, True, (230,235,245))
+        surf.blit(txt, (self.box.right+10, self.box.y+2))
+    def handle(self, e):
+        if e.type==pg.MOUSEBUTTONDOWN and e.button==1 and self.box.collidepoint(e.pos):
+            self.value = not self.value
+
+class Stepper:
+    def __init__(self, label, x, y, font, minv, maxv, step, value):
+        self.label, self.font = label, font
+        self.minv, self.maxv, self.step = minv, maxv, step
+        self.value = value
+        self.minus = pg.Rect(x, y, 36, 32)
+        self.plus  = pg.Rect(x+160, y, 36, 32)
+        self.box   = pg.Rect(x+40, y, 116, 32)
+    def draw(self, surf):
+        rounded_rect(surf,(40,50,70), self.minus, radius=6); rounded_rect(surf,(40,50,70), self.plus, radius=6)
+        m = self.font.render("-", True, (245,245,250))
+        p = self.font.render("+", True, (245,245,250))
+        surf.blit(m, m.get_rect(center=self.minus.center)); surf.blit(p, p.get_rect(center=self.plus.center))
+        rounded_rect(surf,(25,30,45), self.box, radius=6)
+        val = self.font.render(str(self.value), True, (240,245,255))
+        surf.blit(val, val.get_rect(center=self.box.center))
+        lab = self.font.render(self.label, True, (225,232,240))
+        surf.blit(lab, (self.minus.x, self.minus.y-24))
+    def handle(self, e):
+        if e.type==pg.MOUSEBUTTONDOWN and e.button==1:
+            if self.minus.collidepoint(e.pos): self.value = max(self.minv, self.value - self.step)
+            if self.plus.collidepoint(e.pos):  self.value = min(self.maxv, self.value + self.step)
+
+class Swatches:
+    def __init__(self, label, x, y, font, options, idx=0):
+        self.label, self.font = label, font
+        self.options = options
+        self.idx = idx
+        self.rects = []
+        padding = 8
+        cx = x
+        for name, col in options:
+            r = pg.Rect(cx, y, 28, 28); self.rects.append(r); cx += r.w + padding
+    def current_color(self): return self.options[self.idx][1]
+    def current_name(self): return self.options[self.idx][0]
+    def draw(self, surf):
+        lab = self.font.render(self.label, True, (225,232,240)); surf.blit(lab, (self.rects[0].x, self.rects[0].y-24))
+        for i, r in enumerate(self.rects):
+            if self.options[i][0] == "Rainbow":
+                stripe = pg.Surface((r.w, r.h))
+                for x in range(r.w):
+                    stripe.fill(hsv_to_rgb(x/r.w, 0.85, 1.0), rect=pg.Rect(x,0,1,r.h))
+                surf.blit(stripe, r)
+            else:
+                rounded_rect(surf, self.options[i][1], r, radius=6)
+            if i == self.idx:
+                pg.draw.rect(surf, (255,255,255), r, 2, border_radius=6)
+    def handle(self, e):
+        if e.type==pg.MOUSEBUTTONDOWN and e.button==1:
+            for i, r in enumerate(self.rects):
+                if r.collidepoint(e.pos): self.idx = i; break
+
+class Cycler:
+    def __init__(self, label, x, y, font, options, idx=0):
+        self.label, self.font = label, font
+        self.options = options; self.idx = idx
+        self.left = pg.Rect(x, y, 32, 32)
+        self.right= pg.Rect(x+200, y, 32, 32)
+        self.box  = pg.Rect(x+40, y, 156, 32)
+    def current(self): return self.options[self.idx]
+    def draw(self, surf):
+        lab = self.font.render(self.label, True, (225,232,240)); surf.blit(lab, (self.left.x, self.left.y-24))
+        for rect, txt in [(self.left,"<"), (self.right,">")]:
+            rounded_rect(surf,(40,50,70), rect, radius=6)
+            t = self.font.render(txt, True, (240,245,255)); surf.blit(t, t.get_rect(center=rect.center))
+        rounded_rect(surf,(25,30,45), self.box, radius=6)
+        val = self.font.render(self.current(), True, (240,245,255))
+        surf.blit(val, val.get_rect(center=self.box.center))
+    def handle(self, e):
+        if e.type==pg.MOUSEBUTTONDOWN and e.button==1:
+            if self.left.collidepoint(e.pos):  self.idx = (self.idx - 1) % len(self.options)
+            if self.right.collidepoint(e.pos): self.idx = (self.idx + 1) % len(self.options)
+
+# ==================== Game Objects ====================
+class Snake:
+    def __init__(self, body_col=(56,214,169), color_mode="Solid"):
+        self.body_col = body_col
+        self.color_mode = color_mode
+        self.reset()
+    def reset(self):
+        cx,cy = GRID_W//2, GRID_H//2
+        self.body = [(cx,cy),(cx-1,cy),(cx-2,cy)]
+        self.dir = (1,0)
+        self.grow_pending = 0
+        self.alive = True
+    def set_dir(self, nd):
+        if nd[0]==-self.dir[0] and nd[1]==-self.dir[1]: return
+        self.dir = nd
+    def step_predict(self, hazards_set, wrap_edges=False):
+        hx,hy = self.body[0]
+        nx,ny = hx+self.dir[0], hy+self.dir[1]
+        if wrap_edges:
+            nx %= GRID_W; ny %= GRID_H
+        else:
+            if nx<0 or ny<0 or nx>=GRID_W or ny>=GRID_H: return (nx,ny), "wall"
+        new_head = (nx,ny)
+        if new_head in self.body: return new_head, "self"
+        if new_head in hazards_set: return new_head, "hazard"
+        return new_head, "ok"
+    def commit_move(self, new_head):
+        self.body.insert(0,new_head)
+        if self.grow_pending>0: self.grow_pending-=1
+        else: self.body.pop()
+    def step(self, hazards_set, wrap_edges=False, shield_ref=None):
+        if not self.alive: return None
+        new_head, cond = self.step_predict(hazards_set, wrap_edges)
+        if cond == "ok":
+            self.commit_move(new_head); return "ok"
+        if shield_ref is not None and shield_ref() > 0:
+            return "shielded"
+        self.alive = False
+        return "dead"
+    def grow(self,n=1): self.grow_pending+=n
+    def _segment_color(self, i, total, t):
+        if self.color_mode != "Rainbow": return self.body_col
+        h = ((i/max(1,total-1)) + t*0.2) % 1.0
+        return hsv_to_rgb(h, 0.85, 1.0)
+    def draw(self, surf, time_sec=0.0):
+        total = len(self.body)
+        for i,(x,y) in enumerate(self.body[::-1]):
+            px,py = cell_to_px((x,y))
+            rect = pg.Rect(px+3,py+3,CELL_SIZE-6,CELL_SIZE-6)
+            pg.draw.rect(surf,(0,0,0,55), rect.move(2,2), border_radius=10)
+            color = HEAD_COLOR if i==total-1 else self._segment_color(i,total,time_sec)
+            if color==HEAD_COLOR:
+                glow_circle(surf, rect.center, int(CELL_SIZE*0.65), (*HEAD_COLOR,70), 3)
+            rounded_rect(surf, color, rect, radius=10)
+        hx,hy = self.body[0]
+        hpx,hpy = cell_to_px((hx,hy))
+        off = (self.dir[0]*6, self.dir[1]*6)
+        e1=(hpx+CELL_SIZE//2-6+off[0], hpy+CELL_SIZE//2-6+off[1])
+        e2=(hpx+CELL_SIZE//2+6+off[0], hpy+CELL_SIZE//2-6+off[1])
+        pg.draw.circle(surf,(30,30,30),e1,3); pg.draw.circle(surf,(30,30,30),e2,3)
+
+class AppleManager:
+    def __init__(self, count, forbidden_fn):
+        self.count = count
+        self.forbidden_fn = forbidden_fn
+        self.positions = []
+        self.ensure_count()
+    def free_cells(self):
+        forb = self.forbidden_fn()
+        return [(x,y) for x in range(GRID_W) for y in range(GRID_H)
+                if (x,y) not in forb and (x,y) not in self.positions]
+    def ensure_count(self):
+        while len(self.positions) < self.count:
+            free = self.free_cells()
+            if not free: break
+            self.positions.append(random.choice(free))
+    def handle_eaten_at(self, pos):
+        if pos in self.positions:
+            self.positions.remove(pos)
+            self.ensure_count()
+    def draw(self, surf):
+        for pos in self.positions:
+            px,py = cell_to_px(pos)
+            rect = pg.Rect(px+6,py+6,CELL_SIZE-12,CELL_SIZE-12)
+            glow_circle(surf, rect.center, int(CELL_SIZE*0.50), (255,99,132,80), 3)
+            rounded_rect(surf, (255,99,132), rect, radius=10)
+            hi = pg.Surface((rect.w, rect.h//2), pg.SRCALPHA)
+            pg.draw.ellipse(hi,(255,255,255,40), hi.get_rect())
+            surf.blit(hi,(rect.x,rect.y))
+
+# ===== Spiral fix helpers (connectivity) =====
+def reachable_fraction(obstacles, start):
+    free = {(x, y) for x in range(GRID_W) for y in range(GRID_H)
+            if (x, y) not in obstacles}
+    if start not in free:
+        return 0.0
+    q = deque([start]); seen = {start}
+    while q:
+        x, y = q.popleft()
+        for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
+            nx, ny = x+dx, y+dy
+            if 0 <= nx < GRID_W and 0 <= ny < GRID_H:
+                if (nx, ny) in free and (nx, ny) not in seen:
+                    seen.add((nx, ny)); q.append((nx, ny))
+    return len(seen) / max(1, len(free))
+
+def build_spiral_with_gates(forbidden, gate_width=2, ring_step=2, margin=2, phase=0):
+    cells = set()
+    x0, y0 = margin, margin
+    x1, y1 = GRID_W - margin - 1, GRID_H - margin - 1
+    ring = 0
+    while x0 < x1 and y0 < y1:
+        for x in range(x0, x1 + 1):
+            cells.add((x, y0)); cells.add((x, y1))
+        for y in range(y0, y1 + 1):
+            cells.add((x0, y)); cells.add((x1, y))
+        side = (ring + phase) % 4
+        midx = (x0 + x1) // 2
+        midy = (y0 + y1) // 2
+        if side == 0:
+            for dx in range(-(gate_width//2), gate_width - gate_width//2):
+                cells.discard((midx + dx, y0))
+        elif side == 1:
+            for dy in range(-(gate_width//2), gate_width - gate_width//2):
+                cells.discard((x1, midy + dy))
+        elif side == 2:
+            for dx in range(-(gate_width//2), gate_width - gate_width//2):
+                cells.discard((midx + dx, y1))
+        else:
+            for dy in range(-(gate_width//2), gate_width - gate_width//2):
+                cells.discard((x0, midy + dy))
+        x0 += ring_step; y0 += ring_step
+        x1 -= ring_step; y1 -= ring_step
+        ring += 1
+    start_clear = [(GRID_W//2 + i, GRID_H//2) for i in range(-2, 3)] + \
+                  [(GRID_W//2, GRID_H//2 + j) for j in range(-2, 3)]
+    cells -= set(start_clear)
+    cells -= set(forbidden)
+    return cells
+
+def gen_map_obstacles(name, forbidden):
+    cells=set()
+    if name=="Classic":
+        return cells
+    elif name=="Box":
+        for x in range(2, GRID_W-2):
+            cells.add((x,2)); cells.add((x,GRID_H-3))
+        for y in range(3, GRID_H-3):
+            cells.add((2,y)); cells.add((GRID_W-3,y))
+    elif name=="Spiral":
+        best = None; best_score = -1.0
+        for phase in range(4):
+            trial = build_spiral_with_gates(forbidden, gate_width=2, ring_step=2, margin=2, phase=phase)
+            score = reachable_fraction(trial, (GRID_W//2, GRID_H//2))
+            if score > best_score:
+                best, best_score = trial, score
+            if score >= 0.98:
+                break
+        cells = best
+    elif name=="RandomWalls":
+        attempts = 0
+        while True:
+            attempts += 1
+            trial = set()
+            allc=[(x,y) for x in range(GRID_W) for y in range(GRID_H) if (x,y) not in forbidden]
+            random.shuffle(allc)
+            for (x,y) in allc[:int(GRID_W*GRID_H*0.06)]:
+                trial.add((x,y))
+            start_clear = [(GRID_W//2 + i, GRID_H//2) for i in range(-2, 3)] + \
+                          [(GRID_W//2, GRID_H//2 + j) for j in range(-2, 3)]
+            trial -= set(start_clear)
+            if reachable_fraction(trial, (GRID_W//2, GRID_H//2)) >= 0.95 or attempts >= 6:
+                cells = trial; break
+    start_clear=[(GRID_W//2+i,GRID_H//2) for i in range(-2,2)]
+    for c in start_clear: cells.discard(c)
+    cells -= set(forbidden)
+    return cells
+
+class Fireball:
+    def __init__(self, speed_mult=8.0):
+        edges=[((0,random.randrange(GRID_H)),(1,0)),
+               ((GRID_W-1,random.randrange(GRID_H)),(-1,0)),
+               ((random.randrange(GRID_W),0),(0,1)),
+               ((random.randrange(GRID_W),GRID_H-1),(0,-1))]
+        start, vec = random.choice(edges)
+        self.fx, self.fy = start[0]+0.5, start[1]+0.5
+        base = speed_mult
+        self.vx, self.vy = vec[0]*base, vec[1]*base
+        self.radius = CELL_SIZE//3
+        self.dead=False
+    def update(self, dt):
+        self.fx += self.vx*dt; self.fy += self.vy*dt
+        if self.fx< -1 or self.fy< -1 or self.fx>GRID_W+1 or self.fy>GRID_H+1:
+            self.dead=True
+    def cell(self): return (int(self.fx), int(self.fy))
+    def draw(self, surf):
+        x,y = int(self.fx*CELL_SIZE), int(self.fy*CELL_SIZE)
+        glow_circle(surf, (x,y), int(self.radius*1.3), (255,150,90,90), 3)
+        pg.draw.circle(surf, (255,150,90), (x,y), self.radius)
+
+class Projectile:
+    def __init__(self, speed_cells=1):
+        self.y = random.randrange(GRID_H)
+        self.x = -1
+        self.speed = speed_cells
+    def update(self): self.x += self.speed
+    def offscreen(self): return self.x > GRID_W
+    def draw(self, surf):
+        pg.draw.rect(surf, (230,230,30),
+                     (self.x * CELL_SIZE, self.y * CELL_SIZE + CELL_SIZE // 3,
+                      CELL_SIZE, CELL_SIZE // 3))
+    def segment_hit_index(self, snake):
+        for idx, (sx, sy) in enumerate(snake.body):
+            if sy == self.y and self.x == sx:
+                return idx
+        return None
+
+class Bot:
+    def __init__(self, forbidden, delay_ticks=6):
+        free=[(x,y) for x in range(GRID_W) for y in range(GRID_H) if (x,y) not in forbidden]
+        self.pos=random.choice(free) if free else (0,0)
+        self.dir=random.choice([(1,0),(-1,0),(0,1),(0,-1)])
+        self._delay_ticks = max(1, int(delay_ticks))
+        self._tick_counter = 0
+    def step(self, forbidden):
+        self._tick_counter += 1
+        if self._tick_counter < self._delay_ticks:
+            return
+        self._tick_counter = 0
+        choices=[self.dir,(1,0),(-1,0),(0,1),(0,-1)]
+        seen=set()
+        for d in choices:
+            if d in seen: continue
+            seen.add(d)
+            nx=self.pos[0]+d[0]; ny=self.pos[1]+d[1]
+            if 0<=nx<GRID_W and 0<=ny<GRID_H and (nx,ny) not in forbidden:
+                self.pos=(nx,ny); self.dir=d; return
+    def draw(self, surf):
+        px,py=cell_to_px(self.pos)
+        rect=pg.Rect(px+5,py+5,CELL_SIZE-10,CELL_SIZE-10)
+        glow_circle(surf, rect.center, int(CELL_SIZE*0.6), (140,190,255,70), 2)
+        rounded_rect(surf, (140,190,255), rect, radius=10)
+
+# ==================== NEW: Coins & PowerUps ====================
+class CoinManager:
+    def __init__(self, count, forbidden_fn):
+        self.count = count
+        self.forbidden_fn = forbidden_fn
+        self.positions = []
+        self.ensure_count()
+    def free_cells(self):
+        forb = self.forbidden_fn()
+        return [(x,y) for x in range(GRID_W) for y in range(GRID_H)
+                if (x,y) not in forb and (x,y) not in self.positions]
+    def ensure_count(self):
+        while len(self.positions) < self.count:
+            free = self.free_cells()
+            if not free: break
+            self.positions.append(random.choice(free))
+    def handle_pick(self, pos):
+        if pos in self.positions:
+            self.positions.remove(pos); self.ensure_count(); return True
+        return False
+    def draw(self, surf):
+        for pos in self.positions:
+            px,py = cell_to_px(pos)
+            r = CELL_SIZE//3
+            glow_circle(surf, (px+CELL_SIZE//2,py+CELL_SIZE//2), int(r*1.2), (255,220,90,90), 3)
+            pg.draw.circle(surf, (255,215,70), (px+CELL_SIZE//2, py+CELL_SIZE//2), r)
+            pg.draw.circle(surf, (240,240,140), (px+CELL_SIZE//2-3, py+CELL_SIZE//2-3), 3)
+
+class PowerUp:
+    TYPES = ("Shield","Magnet","Teleport")
+    COLORS = {"Shield":(120,200,255),"Magnet":(200,140,255),"Teleport":(255,230,120)}
+    def __init__(self, kind, pos):
+        self.kind = kind
+        self.pos = pos
+        self.born = pg.time.get_ticks()
+    def draw(self, surf):
+        px,py = cell_to_px(self.pos)
+        c = self.COLORS[self.kind]
+        glow_circle(surf, (px+CELL_SIZE//2,py+CELL_SIZE//2), int(CELL_SIZE*0.55), (*c,90),3)
+        rounded_rect(surf, c, pg.Rect(px+6,py+6,CELL_SIZE-12,CELL_SIZE-12), radius=10)
+        pg.draw.circle(surf,(20,24,30),(px+CELL_SIZE//2,py+CELL_SIZE//2),3)
+
+class PowerUpManager:
+    def __init__(self, forbidden_fn):
+        self.forbidden_fn = forbidden_fn
+        self.items = []
+    def spawn_try(self):
+        if len(self.items) >= POWERUP_MAX_ON_FIELD: return
+        if random.random() > POWERUP_SPAWN_CHANCE_PER_MOVE: return
+        free=[(x,y) for x in range(GRID_W) for y in range(GRID_H)
+              if (x,y) not in self.forbidden_fn()]
+        if not free: return
+        pos = random.choice(free)
+        kind = random.choice(PowerUp.TYPES)
+        self.items.append(PowerUp(kind, pos))
+    def take_at(self, cell):
+        for i,p in enumerate(self.items):
+            if p.pos == cell:
+                kind = p.kind
+                self.items.pop(i)
+                return kind
+        return None
+    def draw(self, surf):
+        for p in self.items: p.draw(surf)
+
+# ==================== Kindness Intro ====================
+def play_kindness_intro(screen, w, h, cell_size, seconds=8.5, fps=60):
+    clock = pg.time.Clock()
+    font_big   = pg.font.SysFont("Segoe UI", 44, bold=True)
+    font_small = pg.font.SysFont("Segoe UI", 22, bold=True)
+    def draw_bg2(surf):
+        for y in range(h):
+            u = y / max(1, h - 1)
+            r = int(BG_TOP[0] + (BG_BOTTOM[0] - BG_TOP[0]) * u)
+            g = int(BG_TOP[1] + (BG_BOTTOM[1] - BG_TOP[1]) * u)
+            b = int(BG_TOP[2] + (BG_BOTTOM[2] - BG_TOP[2]) * u)
+            pg.draw.line(surf, (r, g, b), (0, y), (w, y))
+    def cxy(cx, cy):  return (cx*cell_size+cell_size//2, cy*cell_size+cell_size//2)
+    apples_cells = [(6, 6), (10, 12), (15, 5)]
+    people_cells = [(19, 6), (20, 10), (21, 13)]
+    apples_px = [cxy(*c) for c in apples_cells]; people_px=[cxy(*c) for c in people_cells]
+    start = (-cell_size, h//2); end = (w//2, int(h*0.82))
+    waypoints=[start]+apples_px+people_px+[end]
+    class AnimSnake:
+        def __init__(self, pos):
+            self.head = pg.math.Vector2(pos)
+            self.trail = []; self.spacing=18; self.length=11; self.speed=230.0; self.ti=1
+        def update(self, dt):
+            done = self.ti >= len(waypoints)
+            if done: self.trail.append(self.head.xy); return True
+            tgt = pg.math.Vector2(waypoints[self.ti]); v = tgt - self.head
+            d = v.length()
+            if d>0:
+                step = min(d, self.speed*dt); self.head += v.normalize()*step
+            if d<6: self.ti += 1
+            self.trail.append(self.head.xy); return False
+        def draw(self, surf):
+            pts=self.trail
+            for i in range(self.length,0,-1):
+                idx=max(0,len(pts)-1 - i*self.spacing); x,y=map(int,pts[idx]); r=max(5,9-(self.length-i)//2)
+                pg.draw.circle(surf, (56,214,169), (x,y), r)
+            hx,hy=int(self.head.x), int(self.head.y)
+            pg.draw.circle(surf, (255,222,89), (hx,hy), 11)
+            pg.draw.circle(surf, (30,30,30), (hx-4,hy-3), 2)
+            pg.draw.circle(surf, (30,30,30), (hx+4,hy-3), 2)
+    def draw_apple(surf, pos):
+        x,y=pos; pg.draw.circle(surf,(235,70,90),(x,y), cell_size//3)
+        pg.draw.rect(surf,(40,120,50),(x-2,y-cell_size//2+6,4,10))
+        pg.draw.circle(surf,(255,200,210),(x-6,y-6),3)
+    def draw_person(surf,pos):
+        x,y=pos
+        pg.draw.circle(surf,(230,235,245),(x,y-12),8)
+        pg.draw.line(surf,(200,210,225),(x,y-4),(x,y+14),3)
+        pg.draw.line(surf,(200,210,225),(x-10,y+2),(x+10,y+2),3)
+        pg.draw.line(surf,(200,210,225),(x,y+14),(x-8,y+26),3)
+        pg.draw.line(surf,(200,210,225),(x,y+14),(x+8,y+26),3)
+    class Heart:
+        def __init__(self,pos):
+            self.p=pg.math.Vector2(pos); ang=random.uniform(-0.8,-2.2); spd=random.uniform(50,90)
+            self.v=pg.math.Vector2(math.cos(ang)*spd, math.sin(ang)*spd); self.t=0.0; self.life=random.uniform(0.8,1.4)
+        def update(self,dt):
+            self.t+=dt; self.p+=self.v*dt; self.v.y+=-10.0*dt; return self.t>=self.life
+        def draw(self,surf):
+            a=int(255*max(0,1-self.t/self.life)); s=pg.Surface((18,18),pg.SRCALPHA); col=(255,90,140,a)
+            pg.draw.circle(s,col,(5,6),5); pg.draw.circle(s,col,(12,6),5); pg.draw.polygon(s,col,[(1,8),(16,8),(8,17)])
+            surf.blit(s,(int(self.p.x)-9,int(self.p.y)-9))
+    snake=AnimSnake(start); hearts=[]; elapsed=0.0; finished=False; fade=0.0; FADE=1.0
+    def poof(pos,n=6):  [hearts.append(Heart(pos)) for _ in range(n)]
+    while True:
+        dt = clock.tick(fps)/1000.0; elapsed+=dt
+        for e in pg.event.get():
+            if e.type==pg.QUIT: pg.quit(); sys.exit()
+        if not finished: finished = snake.update(dt)
+        hx,hy = map(int, snake.head.xy)
+        for pos in apples_px:
+            if (hx-pos[0])**2+(hy-pos[1])**2 < (cell_size//2)**2: poof(pos,7)
+        for pos in people_px:
+            if (hx-pos[0])**2+(hy-pos[1])**2 < (cell_size//2)**2: poof((pos[0],pos[1]-16),7)
+        hearts[:] = [h for h in hearts if not h.update(dt)]
+        if (finished and not hearts) or elapsed>=seconds:
+            fade += dt
+            if fade >= FADE:
+                return
+        draw_bg2(screen)
+        for pos in apples_px: draw_apple(screen,pos)
+        for pos in people_px: draw_person(screen,pos)
+        for hrt in hearts: hrt.draw(screen)
+        snake.draw(screen)
+        t=min(1,max(0,1.2-abs(2.0-elapsed)))
+        if t>0:
+            overlay=pg.Surface((w,120),pg.SRCALPHA)
+            text=font_big.render("Kindness",True,(255,255,255))
+            sub =font_small.render("sharing apples with friends",True,(220,230,245))
+            overlay.blit(text,text.get_rect(center=(w//2,44)))
+            overlay.blit(sub, sub.get_rect(center=(w//2,88)))
+            overlay.set_alpha(int(255*t)); screen.blit(overlay,(0,24))
+        if fade>0:
+            a=int(255*min(1,fade/FADE)); f=pg.Surface((w,h),pg.SRCALPHA); f.fill((0,0,0,a)); screen.blit(f,(0,0))
+        pg.display.flip()
+
+# ==================== Game Core ====================
+class Game:
+    def __init__(self):
+        pg.display.set_caption("Snake — Google-ish+Shop+Tutorial")
+        self.screen=pg.display.set_mode((W,H))
+        self.clock=pg.time.Clock()
+        self.font_big=pg.font.SysFont("Segoe UI", 36, bold=True)
+        self.font_med=pg.font.SysFont("Segoe UI", 24, bold=True)
+        self.font_small=pg.font.SysFont("Segoe UI", 16)
+        self.MOVE_EVENT=pg.USEREVENT+1
+        self.BOT_EVENT=pg.USEREVENT+2
+
+        self.state="mode_menu"
+        self.best=0
+
+        # Persistent meta (coins & shop)
+        self.total_coins = 0
+        self.shop_shields = 0
+        self.shop_magnets = 0
+        self.shop_teleports = 0
+
+        # Customization state
+        self.snake_color_idx = 7
+        self.map_idx = 0
+        self.apples_at_once = DEFAULT_APPLES_AT_ONCE
+        self.projectile_speed = DEFAULT_PROJECTILE_SPEED
+        self.fireball_speed_mult = DEFAULT_FIREBALL_MULT
+        self.drone_delay = DEFAULT_DRONE_DELAY
+        self.inverse_controls = False
+        self.wrap_edges = False
+
+        # Tutorial flags
+        self.is_tutorial = False
+        self.tut_step = 0
+        self.tut_dir_changes = 0
+        self.tut_survive_ticks = 0
+        self.tut_used_tele = False
+
+        now=pg.time.get_ticks()
+        self.instructions_until=now+INSTR_SHOW_MS
+        self.instructions_shown=True
+
+        self.carousel_setup()
+        self.customize_setup()
+        self.speed_setup()
+        self.shop_setup()
+
+        self.selected_mode = "classic"
+        self.move_ms = MOVE_NORM
+        self.reset_run()
+        self.next_dir = (1,0)
+
+    # ----- Menus -----
+    def carousel_setup(self):
+        cy=int(H*0.58)
+        self.posns=[(W//2-320,cy),(W//2,cy),(W//2+320,cy)]
+        self.sizes=[56,82,56]
+        self.mode_ring = [
+            ("Classic","classic",(120,184,255)),
+            ("Obstacles","obstacles",(56,214,169)),
+            ("Fireballs","fireballs",(255,170,92)),
+            ("Projectiles","projectiles",(230,230,30)),
+            ("Bots","bots",(190,140,255)),
+            ("Tutorial","tutorial",(255,230,120)),
+        ]
+
+    def speed_setup(self):
+        self.speed_options=[("Slow", MOVE_SLOW, (120,184,255)),
+                            ("Normal", MOVE_NORM, (56,214,169)),
+                            ("Fast", MOVE_FAST, (255,170,92))]
+        self.speed_selected_idx=1
+
+    def customize_setup(self):
+        x0, y0 = 60, 160
+        self.swatches = Swatches("Snake Color", x0, y0, self.font_small, COLOR_OPTIONS, idx=self.snake_color_idx)
+        self.cycle_map = Cycler("Map", x0, y0+70, self.font_small, MAP_OPTIONS, idx=self.map_idx)
+        self.step_apples = Stepper("Apples at once", x0, y0+140, self.font_small, 1, 5, 1, self.apples_at_once)
+        self.step_proj   = Stepper("Projectile speed (cells/step)", x0, y0+210, self.font_small, 1, 5, 1, self.projectile_speed)
+        self.step_fire   = Stepper("Fireball speed ×", x0, y0+280, self.font_small, 2, 14, 1, int(self.fireball_speed_mult))
+        self.step_drone  = Stepper("Drone delay ticks", x0, y0+350, self.font_small, 2, 15, 1, self.drone_delay)
+        self.tog_inverse = Toggle("Inverse controls", x0+420, y0+8, self.font_small, init=self.inverse_controls)
+        self.tog_wrap    = Toggle("Teleport edges (borderless)", x0+420, y0+70, self.font_small, init=self.wrap_edges)
+        self.btn_back = Button(pg.Rect(40, H-70, 120, 40), "Back", self.font_small, lambda: self.goto_mode_menu())
+        self.btn_play = Button(pg.Rect(W-160, H-70, 120, 40), "Play", self.font_small, lambda: self.goto_speed_menu())
+
+    def shop_setup(self):
+        x0,y0 = 60, 150
+        self.shop_btn_back = Button(pg.Rect(40, H-70, 120, 40), "Back", self.font_small, lambda: self.goto_mode_menu())
+        self.shop_buy_sh   = Button(pg.Rect(x0, y0, 220, 44), f"Buy Shield ({PRICE_SHIELD})", self.font_small, self.buy_shield)
+        self.shop_buy_mag  = Button(pg.Rect(x0, y0+60, 220, 44), f"Buy Magnet ({PRICE_MAGNET})", self.font_small, self.buy_magnet)
+        self.shop_buy_tel  = Button(pg.Rect(x0, y0+120,220, 44), f"Buy Teleport ({PRICE_TELE})", self.font_small, self.buy_tele)
+        self.shop_play     = Button(pg.Rect(W-160, H-70, 120, 40), "Play", self.font_small, lambda: self.goto_speed_menu())
+
+    def buy_shield(self):
+        if self.total_coins >= PRICE_SHIELD:
+            self.total_coins -= PRICE_SHIELD; self.shop_shields += 1
+    def buy_magnet(self):
+        if self.total_coins >= PRICE_MAGNET:
+            self.total_coins -= PRICE_MAGNET; self.shop_magnets += 1
+    def buy_tele(self):
+        if self.total_coins >= PRICE_TELE:
+            self.total_coins -= PRICE_TELE; self.shop_teleports += 1
+
+    def open_customize(self):
+        self.swatches.idx = self.snake_color_idx
+        self.cycle_map.idx = self.map_idx
+        self.step_apples.value = self.apples_at_once
+        self.step_proj.value   = self.projectile_speed
+        self.step_fire.value   = int(self.fireball_speed_mult)
+        self.step_drone.value  = self.drone_delay
+        self.tog_inverse.value = self.inverse_controls
+        self.tog_wrap.value    = self.wrap_edges
+        self.state="customize"
+
+    def goto_mode_menu(self):
+        self.state="mode_menu"
+        now=pg.time.get_ticks()
+        self.instructions_until=now+INSTR_SHOW_MS
+        self.instructions_shown=True
+
+    def goto_speed_menu(self):
+        self.state="speed_menu"
+
+    def open_shop(self):
+        self.state="shop"
+
+    def draw_instructions(self, target):
+        if not self.instructions_shown: return
+        now=pg.time.get_ticks(); left=self.instructions_until - now
+        if left>=0: alpha=255
+        else:
+            t=1.0 + (left/float(INSTR_FADE_MS))
+            if t<=0.0: self.instructions_shown=False; return
+            alpha=int(255*t)
+        text_surf=self.font_small.render(INSTR_TEXT, True, (245,248,255))
+        pad_x,pad_y=12,6
+        box_w=text_surf.get_width()+pad_x*2; box_h=text_surf.get_height()+pad_y*2
+        box=pg.Surface((box_w,box_h),pg.SRCALPHA); pg.draw.rect(box,(0,0,0,160),box.get_rect(),border_radius=10)
+        box.blit(text_surf,(pad_x,pad_y)); box.set_alpha(alpha)
+        rect=box.get_rect(midtop=(W//2,8)); target.blit(box,rect)
+
+    def draw_mode_menu(self, dt, events):
+        scene=pg.Surface((W,H),pg.SRCALPHA)
+        draw_gradient(scene); draw_grid(scene)
+        title=self.font_big.render("Choose Mode", True, (255,240,245))
+        scene.blit(title,title.get_rect(center=(W//2,int(H*0.25))))
+        hint=self.font_small.render("C = Customize • H = Shop • Enter = Speed → Play", True, (210,215,230))
+        scene.blit(hint,hint.get_rect(center=(W//2,int(H*0.34))))
+
+        view=[self.mode_ring[0], self.mode_ring[1], self.mode_ring[2]]
+        for i in range(3):
+            lbl,payload,col=view[i]
+            cx,cy=self.posns[i]; r=self.sizes[i]
+            t=pg.time.get_ticks()/1000.0
+            if i==1:
+                glow_circle(scene,(cx,cy),int(r*1.05), (*col,110),3)
+                halo=6+4*(math.sin(t*2)+1)*0.5
+                glow_circle(scene,(cx,cy),int(r*1.25+halo), (*col,50),3)
+            pg.draw.circle(scene, col, (cx,cy), r)
+            lblsurf=self.font_med.render(lbl, True, (18,20,28))
+            scene.blit(lblsurf,lblsurf.get_rect(center=(cx,cy-6)))
+            subs={"classic":"No hazards","obstacles":"Static blocks","fireballs":"Moving blasts",
+                  "projectiles":"Horizontal beams","bots":"AI drones","tutorial":"Learn basics"}
+            sub=self.font_small.render(subs.get(payload,""), True, (230,235,245))
+            scene.blit(sub, sub.get_rect(center=(cx,cy+18)))
+
+        btn_shop = Button(pg.Rect(W//2-220, int(H*0.76), 120, 44), "Shop (H)", self.font_small, self.open_shop)
+        btn_cust = Button(pg.Rect(W//2-80,  int(H*0.76), 160, 44), "Customize (C)", self.font_small, self.open_customize)
+        btn_play = Button(pg.Rect(W//2+130, int(H*0.76), 120, 44), "Play", self.font_small, self.goto_speed_menu)
+        for b in (btn_shop, btn_cust, btn_play): b.draw(scene)
+
+        coins = self.font_small.render(f"Coins: {self.total_coins}  •  Owned  S:{self.shop_shields}  M:{self.shop_magnets}  T:{self.shop_teleports}", True, TEXT_COLOR)
+        scene.blit(coins, (16, H-32))
+
+        for e in events:
+            if e.type==pg.QUIT: pg.quit(); sys.exit()
+            if e.type==pg.KEYDOWN:
+                if e.key in (pg.K_ESCAPE, pg.K_q): pg.quit(); sys.exit()
+                if e.key in (pg.K_LEFT, pg.K_a): self.mode_ring=self.mode_ring[1:]+self.mode_ring[:1]
+                if e.key in (pg.K_RIGHT, pg.K_d): self.mode_ring=self.mode_ring[-1:]+self.mode_ring[:-1]
+                if e.key in (pg.K_RETURN, pg.K_SPACE):
+                    self.selected_mode=view[1][1]; self.state="speed_menu"
+                if e.key==pg.K_c: self.open_customize()
+                if e.key==pg.K_h: self.open_shop()
+            btn_shop.handle(e); btn_cust.handle(e); btn_play.handle(e)
+
+        self.draw_instructions(scene)
+        self.blit_with_fx(scene); pg.display.flip()
+
+    def draw_customize(self, events):
+        scene=pg.Surface((W,H),pg.SRCALPHA)
+        draw_gradient(scene); draw_grid(scene)
+        title=self.font_big.render("Customize", True, (255,240,245))
+        scene.blit(title,title.get_rect(center=(W//2,80)))
+        self.swatches.draw(scene); self.cycle_map.draw(scene)
+        self.step_apples.draw(scene); self.step_proj.draw(scene); self.step_fire.draw(scene); self.step_drone.draw(scene)
+        self.tog_inverse.draw(scene); self.tog_wrap.draw(scene)
+        self.btn_back.draw(scene); self.btn_play.draw(scene)
+
+        for e in events:
+            if e.type==pg.QUIT: pg.quit(); sys.exit()
+            self.swatches.handle(e); self.cycle_map.handle(e)
+            self.step_apples.handle(e); self.step_proj.handle(e); self.step_fire.handle(e); self.step_drone.handle(e)
+            self.tog_inverse.handle(e); self.tog_wrap.handle(e)
+            self.btn_back.handle(e); self.btn_play.handle(e)
+            if e.type==pg.KEYDOWN and e.key==pg.K_ESCAPE: self.goto_mode_menu()
+
+        info = f"Color: {COLOR_OPTIONS[self.swatches.idx][0]} • Map: {self.cycle_map.current()} • Apples: {self.step_apples.value} • Proj: {self.step_proj.value} • Fire×{self.step_fire.value} • DroneDelay {self.step_drone.value} • Inverse: {'ON' if self.tog_inverse.value else 'OFF'} • Teleport edges: {'ON' if self.tog_wrap.value else 'OFF'}"
+        txt=self.font_small.render(info, True, (210,220,235))
+        scene.blit(txt, (24, H-32))
+
+        self.blit_with_fx(scene); pg.display.flip()
+
+    def draw_shop(self, events):
+        scene=pg.Surface((W,H),pg.SRCALPHA)
+        draw_gradient(scene); draw_grid(scene)
+        title=self.font_big.render("Shop", True, (255,240,245))
+        scene.blit(title, title.get_rect(center=(W//2,80)))
+
+        wallet = self.font_med.render(f"Coins: {self.total_coins}", True, TEXT_COLOR)
+        owned  = self.font_small.render(f"Owned → Shield:{self.shop_shields}  Magnet:{self.shop_magnets}  Teleport:{self.shop_teleports}", True, TEXT_COLOR)
+        scene.blit(wallet,(60,120)); scene.blit(owned,(60,120+28))
+
+        self.shop_buy_sh.draw(scene); self.shop_buy_mag.draw(scene); self.shop_buy_tel.draw(scene)
+        self.shop_btn_back.draw(scene); self.shop_play.draw(scene)
+
+        for e in events:
+            if e.type==pg.QUIT: pg.quit(); sys.exit()
+            self.shop_buy_sh.handle(e); self.shop_buy_mag.handle(e); self.shop_buy_tel.handle(e)
+            self.shop_btn_back.handle(e); self.shop_play.handle(e)
+            if e.type==pg.KEYDOWN and e.key in (pg.K_ESCAPE, pg.K_q):
+                self.goto_mode_menu()
+
+        self.blit_with_fx(scene); pg.display.flip()
+
+    def draw_speed_menu(self, dt, events):
+        scene=pg.Surface((W,H),pg.SRCALPHA)
+        draw_gradient(scene); draw_grid(scene)
+        title=self.font_big.render("Choose Speed",True,(255,240,245))
+        scene.blit(title,title.get_rect(center=(W//2,int(H*0.25))))
+        subt=self.font_small.render("Enter/Space to Play",True,(210,215,230))
+        scene.blit(subt, subt.get_rect(center=(W//2,int(H*0.34))))
+        positions=[(W//2-220,int(H*0.58)),(W//2,int(H*0.58)),(W//2+220,int(H*0.58))]
+        sizes=[62,86,62]
+        for i,(name,ms,col) in enumerate(self.speed_options):
+            cx,cy=positions[i]; r=sizes[i]
+            if i==self.speed_selected_idx: glow_circle(scene,(cx,cy),int(r*1.05), (*col,110),3)
+            pg.draw.circle(scene, col, (cx,cy), r)
+            lbl=self.font_med.render(name, True, (18,20,28)); scene.blit(lbl,lbl.get_rect(center=(cx,cy-6)))
+            tps=f"{int(1000/ms)} tps"
+            sub=self.font_small.render(tps, True, (230,235,245)); scene.blit(sub, sub.get_rect(center=(cx,cy+18)))
+        for e in events:
+            if e.type==pg.QUIT: pg.quit(); sys.exit()
+            if e.type==pg.KEYDOWN:
+                if e.key in (pg.K_ESCAPE, pg.K_q): pg.quit(); sys.exit()
+                if e.key in (pg.K_LEFT, pg.K_a): self.speed_selected_idx=(self.speed_selected_idx-1)%3
+                if e.key in (pg.K_RIGHT, pg.K_d): self.speed_selected_idx=(self.speed_selected_idx+1)%3
+                if e.key in (pg.K_RETURN, pg.K_SPACE):
+                    self.move_ms=self.speed_options[self.speed_selected_idx][1]
+                    # commit customization
+                    self.snake_color_idx = self.swatches.idx
+                    self.map_idx = self.cycle_map.idx
+                    self.apples_at_once = self.step_apples.value
+                    self.projectile_speed = self.step_proj.value
+                    self.fireball_speed_mult = float(self.step_fire.value)
+                    self.drone_delay = self.step_drone.value
+                    self.inverse_controls = self.tog_inverse.value
+                    self.wrap_edges = self.tog_wrap.value
+                    self.is_tutorial = (self.selected_mode == "tutorial")
+                    self.state="game"; self.reset_run()
+        self.blit_with_fx(scene); pg.display.flip()
+
+    # ----- Run & Mechanics -----
+    def reset_run(self):
+        name = COLOR_OPTIONS[self.snake_color_idx][0]
+        color_mode = "Rainbow" if name=="Rainbow" else "Solid"
+        body_col = COLOR_OPTIONS[self.snake_color_idx][1]
+        self.snake=Snake(body_col=body_col, color_mode=color_mode)
+        self.next_dir=self.snake.dir
+        self.score=0; self.collected=0; self.paused=False
+
+        # per-run inventory from shop
+        self.shields = self.shop_shields
+        self.magnet_time = self.shop_magnets * MAGNET_DURATION_SEC
+        self.teleports = self.shop_teleports
+
+        base_forb=set(self.snake.body)
+        self.obstacles = gen_map_obstacles(MAP_OPTIONS[self.map_idx], base_forb)
+        self.fireballs=[]; self.projectiles=[]; self.spawn_proj_timer=0; self.bots=[]
+        if self.selected_mode=="bots":
+            forb=set(self.snake.body)|self.obstacles
+            self.bots=[Bot(forb, delay_ticks=self.drone_delay) for _ in range(3)]
+            pg.time.set_timer(self.BOT_EVENT, max(40, self.move_ms//3))
+        self._flash_until=0; self._shake_until=0
+        self.apples = AppleManager(self.apples_at_once, self.forbidden_cells)
+
+        # NEW fields
+        self.coins_field = CoinManager(max(1, COIN_COUNT_BASE), self.forbidden_cells)
+        self.powerups = PowerUpManager(self.forbidden_cells)
+
+        # Tutorial reset
+        if self.is_tutorial:
+            self.tut_step = 0
+            self.tut_dir_changes = 0
+            self.tut_survive_ticks = 0
+            self.tut_used_tele = False
+
+        pg.time.set_timer(self.MOVE_EVENT, self.move_ms)
+
+    def forbidden_cells(self):
+        s=set(self.snake.body)|self.obstacles
+        if self.selected_mode=="bots": s |= set(b.pos for b in self.bots)
+        if self.selected_mode=="fireballs": s |= {f.cell() for f in self.fireballs}
+        if self.selected_mode=="projectiles": s |= {(p.x, p.y) for p in self.projectiles}
+        if hasattr(self,'apples'): s |= set(self.apples.positions)
+        if hasattr(self,'coins_field'): s |= set(self.coins_field.positions)
+        if hasattr(self,'powerups'): s |= set(p.pos for p in self.powerups.items)
+        return s
+
+    def trigger_hit_fx(self):
+        now=pg.time.get_ticks()
+        self._shake_until=now+SHAKE_MS; self._flash_until=now+FLASH_MS
+
+    def speedup_check(self):
+        SPEEDUP_EVERY, SPEEDUP_DELTA, MOVE_FLOOR = 5, 6, 65
+        if self.collected>=SPEEDUP_EVERY:
+            self.collected=0
+            self.move_ms=max(MOVE_FLOOR, self.move_ms-SPEEDUP_DELTA)
+            pg.time.set_timer(self.MOVE_EVENT, self.move_ms)
+            if self.selected_mode=="bots":
+                pg.time.set_timer(self.BOT_EVENT, max(40, self.move_ms//3))
+
+    def hazards_set(self):
+        s=set(self.obstacles)
+        if self.selected_mode=="bots": s |= {b.pos for b in self.bots}
+        if self.selected_mode=="fireballs": s |= {f.cell() for f in self.fireballs}
+        if self.selected_mode=="projectiles": s |= {(p.x, p.y) for p in self.projectiles}
+        return s
+
+    def handle_eat(self):
+        self.snake.grow(1); self.score+=1
+        self.best=max(self.best,self.score)
+        self.collected+=1
+        self.speedup_check()
+        if self.selected_mode=="obstacles":
+            if self.score % 2 == 1:
+                forb=self.forbidden_cells() - set(self.apples.positions)
+                cand=[(x,y) for x in range(GRID_W) for y in range(GRID_H) if (x,y) not in forb]
+                if cand: self.obstacles.add(random.choice(cand))
+        self.apples.ensure_count()
+
+    def magnet_pull_collect(self):
+        if self.magnet_time <= 0: return
+        head = self.snake.body[0]
+        def near(pos): return abs(pos[0]-head[0]) + abs(pos[1]-head[1]) <= 2
+        for pos in list(self.apples.positions):
+            if near(pos):
+                self.apples.handle_eaten_at(pos); self.handle_eat()
+        for pos in list(self.coins_field.positions):
+            if near(pos):
+                if self.coins_field.handle_pick(pos): self.total_coins += 1
+
+    def try_teleport(self):
+        if self.teleports <= 0: return
+        free=[(x,y) for x in range(GRID_W) for y in range(GRID_H) if (x,y) not in self.forbidden_cells()]
+        if not free: return
+        self.snake.body[0] = random.choice(free)
+        self.teleports -= 1
+        self._flash_until = pg.time.get_ticks() + 100
+        if self.is_tutorial and self.tut_step == 4:
+            self.tut_used_tele = True
+
+    # ----- Tutorial helpers -----
+    def draw_tutorial_overlay(self, surf):
+        msgs = [
+            "Step 1: Move with Arrow Keys or WASD",
+            "Step 2: Eat an Apple",
+            "Step 3: Grab a Coin (gold circle)",
+            "Step 4: Pick up a Power-Up",
+            "Step 5: Press T to Teleport",
+            "Step 6: Survive incoming Projectile for a bit",
+            "Tutorial Complete! Press M for Menu.",
+        ]
+        msg = msgs[self.tut_step if self.tut_step < len(msgs) else -1]
+        box = pg.Surface((W, 44), pg.SRCALPHA)
+        pg.draw.rect(box,(0,0,0,150),(16,6,W-32,32),border_radius=10)
+        txt=self.font_small.render(msg, True, (255,255,255))
+        box.blit(txt, txt.get_rect(center=(W//2, 22)))
+        surf.blit(box,(0,0))
+
+    def tutorial_logic_tick(self):
+        head = self.snake.body[0]
+        if self.tut_step == 0:
+            # Count direction changes
+            pass
+        elif self.tut_step == 1:
+            if head in self.apples.positions:
+                self.apples.handle_eaten_at(head); self.handle_eat()
+        elif self.tut_step == 2:
+            if not self.coins_field.positions:
+                self.coins_field.ensure_count()
+        elif self.tut_step == 3:
+            if not self.powerups.items:
+                # prefer spawning Magnet for a cool demo
+                free=[(x,y) for x in range(GRID_W) for y in range(GRID_H) if (x,y) not in self.forbidden_cells()]
+                if free: self.powerups.items.append(PowerUp("Magnet", random.choice(free)))
+        elif self.tut_step == 4:
+            # wait for teleport key
+            pass
+        elif self.tut_step == 5:
+            # spawn projectiles steadily; count survival ticks
+            self.spawn_proj_timer = max(self.spawn_proj_timer-1, 0)
+            if self.spawn_proj_timer == 0:
+                self.projectiles.append(Projectile(speed_cells=max(1,self.projectile_speed)))
+                self.spawn_proj_timer = 10
+
+    # ----- Events -----
+    def handle_events_game(self):
+        for e in pg.event.get():
+            if e.type==pg.QUIT: pg.quit(); sys.exit()
+            if e.type==pg.KEYDOWN:
+                if e.key in (pg.K_ESCAPE, pg.K_q): pg.quit(); sys.exit()
+                if e.key==pg.K_m: self.goto_mode_menu()
+                if e.key==pg.K_r: self.reset_run()
+                if e.key==pg.K_p and self.snake.alive: self.paused = not self.paused
+                if e.key==pg.K_t and not self.paused and self.snake.alive: self.try_teleport()
+                if not self.paused and self.snake.alive:
+                    cand=None
+                    inv = -1 if self.inverse_controls else 1
+                    if e.key in (pg.K_UP, pg.K_w):    cand=(0,-1*inv)
+                    elif e.key in (pg.K_DOWN, pg.K_s): cand=(0, 1*inv)
+                    elif e.key in (pg.K_LEFT, pg.K_a): cand=(-1*inv,0)
+                    elif e.key in (pg.K_RIGHT, pg.K_d):cand=( 1*inv,0)
+                    if cand is not None:
+                        cx,cy = self.snake.dir; nx,ny = cand
+                        if (nx,ny)!=(-cx,-cy):
+                            if self.is_tutorial and self.tut_step == 0 and (nx,ny) != self.snake.dir:
+                                self.tut_dir_changes += 1
+                            self.next_dir = cand
+
+            if e.type==self.MOVE_EVENT and not self.paused and self.snake.alive:
+                self.snake.set_dir(self.next_dir)
+                # Spawn powerups sometimes
+                self.powerups.spawn_try()
+                # magnet countdown
+                dt_ms = self.clock.get_time()
+                if self.magnet_time > 0: self.magnet_time = max(0.0, self.magnet_time - dt_ms/1000.0)
+
+                def shield_left(): return self.shields
+                res = self.snake.step(self.hazards_set(), wrap_edges=self.wrap_edges, shield_ref=shield_left)
+                if res == "dead":
+                    self.trigger_hit_fx()
+                elif res == "shielded":
+                    if self.shields > 0:
+                        self.shields -= 1
+                        self._flash_until = pg.time.get_ticks() + 90
+                else:
+                    # Apples
+                    if self.snake.body[0] in self.apples.positions:
+                        self.apples.handle_eaten_at(self.snake.body[0]); self.handle_eat()
+                    # Coins
+                    if self.coins_field.handle_pick(self.snake.body[0]): self.total_coins += 1
+                    # PowerUps
+                    kind = self.powerups.take_at(self.snake.body[0])
+                    if kind == "Shield": self.shields += 1
+                    elif kind == "Magnet": self.magnet_time += MAGNET_DURATION_SEC
+                    elif kind == "Teleport": self.teleports += 1
+
+                # Tutorial progression checks
+                if self.is_tutorial:
+                    self.tutorial_logic_tick()
+                    if self.tut_step == 0 and self.tut_dir_changes >= 2: self.tut_step = 1
+                    if self.tut_step == 1 and self.score >= 1: self.tut_step = 2
+                    if self.tut_step == 2 and any(True for _ in [] if False): pass  # keep coin on field
+                    if self.tut_step == 2 and any(True for c in [] if False): pass  # placeholder
+                    if self.tut_step == 2 and self.total_coins >= 1: self.tut_step = 3
+                    if self.tut_step == 3 and self.magnet_time > 0: self.tut_step = 4
+                    if self.tut_step == 4 and self.tut_used_tele:
+                        self.tut_step = 5; self.tut_survive_ticks = 0
+                    if self.tut_step == 5:
+                        self.tut_survive_ticks += 1
+                        if self.tut_survive_ticks >= 40: self.tut_step = 6  # done!
+
+            if e.type==self.BOT_EVENT and not self.paused and self.snake.alive and self.selected_mode=="bots":
+                for _ in range(2):
+                    occupied_by_bots = {bb.pos for bb in self.bots}
+                    for b in self.bots:
+                        forbid = set(self.obstacles) | (occupied_by_bots - {b.pos})
+                        b.step(forbid)
+                        if b.pos in self.snake.body:
+                            if self.shields > 0:
+                                self.shields -= 1; self._flash_until = pg.time.get_ticks() + 90
+                            else:
+                                self.snake.alive=False; self.trigger_hit_fx()
+
+        # Fireballs
+        if self.state=="game" and self.selected_mode=="fireballs" and not self.paused and self.snake.alive:
+            if random.random()<0.02: self.fireballs.append(Fireball(speed_mult=self.fireball_speed_mult))
+            dt=self.clock.get_time()/1000.0
+            for f in self.fireballs:
+                f.update(dt)
+                if f.cell()==self.snake.body[0]:
+                    if self.shields > 0:
+                        self.shields -= 1; self._flash_until = pg.time.get_ticks() + 90
+                    else:
+                        self.snake.alive=False; self.trigger_hit_fx()
+            self.fireballs=[f for f in self.fireballs if not f.dead]
+
+        # Projectiles
+        if self.state=="game" and self.selected_mode=="projectiles" and not self.paused and self.snake.alive:
+            self.spawn_proj_timer -= 1
+            if self.spawn_proj_timer <= 0:
+                self.projectiles.append(Projectile(speed_cells=self.projectile_speed))
+                self.spawn_proj_timer = random.randint(10, 20)
+            for p in list(self.projectiles):
+                p.update()
+                hit_idx = p.segment_hit_index(self.snake)
+                if hit_idx is not None:
+                    if hit_idx == 0:
+                        if self.shields > 0:
+                            self.shields -= 1; self._flash_until = pg.time.get_ticks() + 90
+                        else:
+                            self.snake.alive=False; self.trigger_hit_fx()
+                    else:
+                        self.snake.body = self.snake.body[:hit_idx]
+                        if not self.snake.body:
+                            self.snake.alive=False; self.trigger_hit_fx()
+                    if p in self.projectiles: self.projectiles.remove(p); continue
+                if p.offscreen(): self.projectiles.remove(p)
+
+        # Magnet pull each frame
+        if self.state=="game" and not self.paused and self.snake.alive:
+            self.magnet_pull_collect()
+
+    # ----- Draw -----
+    def draw_obstacles(self, surf):
+        for x,y in self.obstacles:
+            px,py=cell_to_px((x,y))
+            rect=pg.Rect(px+3,py+3,CELL_SIZE-6,CELL_SIZE-6)
+            glow_circle(surf, rect.center, int(CELL_SIZE*0.65), (120,132,158,36),2)
+            rounded_rect(surf, (120,132,158), rect, radius=8)
+            hi=pg.Rect(rect.x+4,rect.y+4,rect.w-8,max(6,rect.h//4))
+            pg.draw.rect(surf, (170,178,196), hi, border_radius=6)
+
+    def draw_game(self):
+        scene=pg.Surface((W,H),pg.SRCALPHA)
+        draw_gradient(scene); draw_grid(scene)
+        self.draw_obstacles(scene)
+        if self.selected_mode=="bots":
+            for b in self.bots: b.draw(scene)
+        if self.selected_mode=="fireballs":
+            for f in self.fireballs: f.draw(scene)
+        if self.selected_mode=="projectiles":
+            for p in self.projectiles: p.draw(scene)
+
+        self.apples.draw(scene)
+        self.coins_field.draw(scene)
+        self.powerups.draw(scene)
+        self.snake.draw(scene, time_sec=pg.time.get_ticks()/1000.0)
+
+        # HUD
+        s=self.font_med.render(f"Score {self.score}", True, TEXT_COLOR)
+        b=self.font_small.render(f"Best {self.best}", True, TEXT_COLOR)
+        m=self.font_small.render(f"Mode {self.selected_mode}", True, (200,206,220))
+        sp=self.font_small.render(f"Speed {int(1000/self.move_ms)} tps", True, (190,196,210))
+        scene.blit(s,(16,10)); scene.blit(b,(16,38)); scene.blit(m,(16,62)); scene.blit(sp,(16,86))
+
+        coin_txt = self.font_small.render(f"Coins: {self.total_coins}", True, (255,230,120))
+        inv_txt  = self.font_small.render(f"Shield×{self.shields}  Magnet:{max(0,int(self.magnet_time))}s  Tele×{self.teleports}  (T to use)", True, (210,235,255))
+        scene.blit(coin_txt, (W-170, 10))
+        scene.blit(inv_txt,  (W-300, 36))
+
+        if self.paused and self.snake.alive:
+            ov=pg.Surface((W,H),pg.SRCALPHA); ov.fill((0,0,0,120)); scene.blit(ov,(0,0))
+            t=self.font_big.render("PAUSED", True, (255,255,255))
+            scene.blit(t,t.get_rect(center=(W//2,H//2-16)))
+            h=self.font_small.render("P resume • M menu • R restart • T teleport", True, TEXT_COLOR)
+            scene.blit(h,h.get_rect(center=(W//2,H//2+18)))
+
+        if not self.snake.alive:
+            ov=pg.Surface((W,H),pg.SRCALPHA); ov.fill((0,0,0,150)); scene.blit(ov,(0,0))
+            t=self.font_big.render("GAME OVER", True, (255,240,245))
+            scene.blit(t,t.get_rect(center=(W//2,H//2-36)))
+            h=self.font_small.render("R restart • M menu", True, TEXT_COLOR)
+            scene.blit(h,h.get_rect(center=(W//2,H//2+2)))
+
+        if self.is_tutorial:
+            self.draw_tutorial_overlay(scene)
+
+        self.blit_with_fx(scene); pg.display.flip()
+
+    # ----- FX & Loop -----
+    def blit_with_fx(self, scene_surface):
+        now=pg.time.get_ticks(); ox=oy=0
+        if now < getattr(self,'_shake_until',0):
+            left=(self._shake_until - now)/SHAKE_MS; mag=max(0, SHAKE_MAG*left)
+            ox=int(random.uniform(-mag,mag)); oy=int(random.uniform(-mag,mag))
+        self.screen.fill((0,0,0)); self.screen.blit(scene_surface,(ox,oy))
+        if now < getattr(self,'_flash_until',0):
+            left=(self._flash_until - now)/FLASH_MS
+            alpha=int(255*left); flash=pg.Surface((W,H),pg.SRCALPHA)
+            flash.fill((255,255,255,alpha)); self.screen.blit(flash,(0,0))
+
+    def run(self):
+        while True:
+            if self.state=="mode_menu":
+                self.draw_mode_menu(0, pg.event.get())
+            elif self.state=="customize":
+                self.draw_customize(pg.event.get())
+            elif self.state=="shop":
+                self.draw_shop(pg.event.get())
+            elif self.state=="speed_menu":
+                self.draw_speed_menu(0, pg.event.get())
+            else:
+                self.handle_events_game(); self.draw_game()
+            self.clock.tick(FPS)
+
+# ==================== Main ====================
+if __name__=="__main__":
+    pg.init()
+    screen=pg.display.set_mode((W,H))
+    play_kindness_intro(screen, W, H, CELL_SIZE)
+    Game().run()
